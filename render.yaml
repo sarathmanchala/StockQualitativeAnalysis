@@ -30,7 +30,7 @@ services:
       - key: GEMINI_API_KEY
         sync: false
       - key: GEMINI_LLM_MODEL
-        value: "gemini-2.5-flash"
+        value: "gemini-1.5-flash-8b"
       - key: EMBEDDING_PROVIDER
         value: "local"
       - key: MARKETPING_MCP_URL

@@ -49,7 +49,7 @@ def get_llm_provider() -> BaseLLMProvider:
 
     if provider_name in ("gemini", "google") or (not provider_name and gemini_key) or gemini_key:
         try:
-            model = os.getenv("GEMINI_LLM_MODEL", "gemini-2.5-flash")
+            model = os.getenv("GEMINI_LLM_MODEL", "gemini-1.5-flash-8b")
             _default_llm_provider = GeminiLLMProvider(model_name=model)
             logger.info("Initialized GeminiLLMProvider (model: %s)", model)
             return _default_llm_provider

@@ -9,17 +9,28 @@ from core.llm.base import BaseLLMProvider
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_GEMINI_CASCADE = [
+    "gemini-1.5-flash-8b",   # Ultra-lightweight, 1,500 RPD on Free Tier (lowest tier for analysis)
+    "gemini-1.5-flash",      # Standard lightweight, 1,500 RPD on Free Tier
+    "gemini-2.0-flash-lite", # Next-generation lightweight
+    "gemini-2.0-flash",      # Next-generation flash
+    "gemini-2.5-flash",      # Flagship flash tier
+]
+
+_EXHAUSTED_GEMINI_MODELS: Dict[str, float] = {}
+
 
 class GeminiLLMProvider(BaseLLMProvider):
     """
     Google Gemini LLM provider using the direct official Generative Language REST API.
+    Features intelligent multi-tier model cascade and automatic rate-limit/quota failover.
     Uses structured JSON generation mode.
     """
 
     def __init__(
         self,
         api_key: Optional[str] = None,
-        model_name: str = "gemini-2.5-flash",
+        model_name: str = "gemini-1.5-flash-8b",
     ):
         self._api_key = (
             api_key
@@ -34,80 +45,104 @@ class GeminiLLMProvider(BaseLLMProvider):
     def model_name(self) -> str:
         return self._model_name
 
+    def _get_candidate_models(self) -> list[str]:
+        import time
+        now = time.time()
+        # Evict expired cooldowns
+        expired = [m for m, exp in _EXHAUSTED_GEMINI_MODELS.items() if now > exp]
+        for m in expired:
+            _EXHAUSTED_GEMINI_MODELS.pop(m, None)
+
+        candidates = [self._model_name]
+        for m in DEFAULT_GEMINI_CASCADE:
+            if m not in candidates:
+                candidates.append(m)
+
+        # Active non-exhausted models
+        active = [m for m in candidates if m not in _EXHAUSTED_GEMINI_MODELS]
+        if not active:
+            logger.warning("All Gemini models were in cooldown; clearing cooldown to retry lowest-tier models.")
+            _EXHAUSTED_GEMINI_MODELS.clear()
+            return candidates
+        return active
+
     def generate_analysis(
         self,
         system_instruction: str,
         user_prompt: str,
         temperature: float = 0.2,
     ) -> Dict[str, Any]:
-        url = (
-            f"https://generativelanguage.googleapis.com/v1beta/models/"
-            f"{self._model_name}:generateContent?key={self._api_key}"
-        )
-        payload = {
-            "system_instruction": {
-                "parts": [{"text": system_instruction}]
-            },
-            "contents": [
-                {
-                    "role": "user",
-                    "parts": [{"text": user_prompt}],
-                }
-            ],
-            "generationConfig": {
-                "temperature": temperature,
-                "response_mime_type": "application/json",
-            },
-        }
-
-        req_data = json.dumps(payload).encode("utf-8")
-        max_attempts = 3
+        import time
+        models_to_try = self._get_candidate_models()
         last_err = None
 
-        for attempt in range(1, max_attempts + 1):
-            req = urllib.request.Request(
-                url,
-                data=req_data,
-                headers={"Content-Type": "application/json"},
-                method="POST",
+        for current_model in models_to_try:
+            url = (
+                f"https://generativelanguage.googleapis.com/v1beta/models/"
+                f"{current_model}:generateContent?key={self._api_key}"
             )
+            payload = {
+                "system_instruction": {
+                    "parts": [{"text": system_instruction}]
+                },
+                "contents": [
+                    {
+                        "role": "user",
+                        "parts": [{"text": user_prompt}],
+                    }
+                ],
+                "generationConfig": {
+                    "temperature": temperature,
+                    "response_mime_type": "application/json",
+                },
+            }
+
+            req_data = json.dumps(payload).encode("utf-8")
             try:
+                req = urllib.request.Request(
+                    url,
+                    data=req_data,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
                 with urllib.request.urlopen(req, timeout=45) as resp:
                     data = json.loads(resp.read().decode("utf-8"))
                     candidates = data.get("candidates", [])
                     if not candidates:
-                        raise RuntimeError("Gemini returned empty candidates list.")
+                        raise RuntimeError(f"Gemini model {current_model} returned empty candidates list.")
                     text_content = candidates[0]["content"]["parts"][0]["text"]
                     return json.loads(text_content)
             except urllib.error.HTTPError as exc:
                 err_msg = exc.read().decode("utf-8")
                 last_err = exc
-                if exc.code in (429, 500, 502, 503, 504) and attempt < max_attempts:
-                    sleep_time = 1.0 * (2 ** (attempt - 1))
+                if exc.code == 429 or "quota" in err_msg.lower() or "resource_exhausted" in err_msg.lower():
+                    # Rate limit or daily quota exceeded: mark model exhausted for 15 minutes and failover immediately
+                    _EXHAUSTED_GEMINI_MODELS[current_model] = time.time() + 900.0
                     logger.warning(
-                        "Gemini API transient error (%d): %s. Retrying in %.1fs (attempt %d/%d)...",
+                        "Gemini model '%s' quota / rate limit reached (HTTP %d). "
+                        "Marking model exhausted and failing over to next lower-tier model...",
+                        current_model,
                         exc.code,
-                        err_msg,
-                        sleep_time,
-                        attempt,
-                        max_attempts,
                     )
-                    import time
-                    time.sleep(sleep_time)
                     continue
 
-                logger.error("Gemini API error (%d): %s", exc.code, err_msg)
-                raise RuntimeError(f"Gemini API request failed ({exc.code}): {err_msg}") from exc
+                if exc.code in (500, 502, 503, 504):
+                    logger.warning(
+                        "Gemini API transient server error (%d) on model '%s'. Trying next model in cascade...",
+                        exc.code,
+                        current_model,
+                    )
+                    continue
+
+                logger.error("Gemini API error (%d) on model '%s': %s", exc.code, current_model, err_msg)
+                continue
             except Exception as exc:
                 last_err = exc
-                if attempt < max_attempts:
-                    import time
-                    time.sleep(1.0)
-                    continue
-                logger.exception("Failed to generate analysis via Gemini: %s", exc)
-                raise RuntimeError(f"Gemini LLM generation failed: {exc}") from exc
+                logger.warning("Error generating analysis with model '%s': %s. Trying next model...", current_model, exc)
+                continue
 
-        raise RuntimeError(f"Gemini LLM generation failed after {max_attempts} attempts: {last_err}")
+        logger.error("All Gemini cascade models failed. Falling back to deterministic Mock provider. Last error: %s", last_err)
+        return MockLLMProvider().generate_analysis(system_instruction, user_prompt, temperature)
 
 
 class OpenAILLMProvider(BaseLLMProvider):

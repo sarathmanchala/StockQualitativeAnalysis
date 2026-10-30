@@ -1,12 +1,117 @@
 import os
 import json
+import time
 import logging
 import google.generativeai as genai
-from typing import Optional, Dict, Any, Union
+from typing import Optional, Dict, Any, Union, List
 
 logger = logging.getLogger(__name__)
 
 DISCLAIMER = "This analysis is for research and educational purposes only and is not financial advice."
+
+# Tiered cascade of Gemini models starting with lower tier, high-throughput, generous free-quota models
+MODEL_CASCADE = [
+    "gemini-1.5-flash-8b",   # Ultra-lightweight, 1,500 RPD on Free Tier (lowest tier for analysis)
+    "gemini-1.5-flash",      # Standard lightweight, 1,500 RPD on Free Tier
+    "gemini-2.0-flash-lite", # Next-generation lightweight
+    "gemini-2.0-flash",      # Next-generation flash
+    "gemini-2.5-flash",      # Flagship flash tier
+]
+
+_EXHAUSTED_MODELS: Dict[str, float] = {}  # model_name -> cooldown timestamp
+
+def _is_rate_limit_or_quota_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return (
+        "quota" in msg
+        or "429" in msg
+        or "resource_exhausted" in msg
+        or "resourceexhausted" in msg
+        or "rate limit" in msg
+        or "too many requests" in msg
+        or "limit exceeded" in msg
+    )
+
+def _get_active_model_cascade() -> List[str]:
+    now = time.time()
+    # Clean up expired cooldowns
+    expired = [m for m, expiry in _EXHAUSTED_MODELS.items() if now > expiry]
+    for m in expired:
+        _EXHAUSTED_MODELS.pop(m, None)
+
+    configured_model = os.getenv("GEMINI_LLM_MODEL")
+    candidate_order: List[str] = []
+    if configured_model and configured_model not in candidate_order:
+        candidate_order.append(configured_model)
+    for m in MODEL_CASCADE:
+        if m not in candidate_order:
+            candidate_order.append(m)
+
+    # Filter out models currently in cooldown
+    active = [m for m in candidate_order if m not in _EXHAUSTED_MODELS]
+    if not active:
+        logger.warning("All Gemini models were in quota cooldown; resetting cooldown to retry lower-tier models.")
+        _EXHAUSTED_MODELS.clear()
+        active = candidate_order
+
+    return active
+
+def execute_gemini_generation(
+    prompt: str,
+    is_json: bool = True,
+    system_instruction: Optional[str] = None
+) -> Optional[Union[Dict[str, Any], str]]:
+    """
+    Executes content generation across a resilient model cascade.
+    If a model hits rate limits or quota exhaustion, it marks it in cooldown
+    and immediately fails over to the next lower-tier model.
+    """
+    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    if not api_key or api_key == "your_gemini_api_key_here":
+        return None
+
+    try:
+        genai.configure(api_key=api_key)
+    except Exception as conf_err:
+        logger.error(f"Failed to configure Gemini client: {conf_err}")
+        return None
+
+    models_to_try = _get_active_model_cascade()
+
+    for m_name in models_to_try:
+        try:
+            logger.info(f"Attempting Gemini generation using model: {m_name}")
+            gen_config = {"response_mime_type": "application/json"} if is_json else None
+            
+            kwargs: Dict[str, Any] = {}
+            if gen_config:
+                kwargs["generation_config"] = gen_config
+            if system_instruction:
+                kwargs["system_instruction"] = system_instruction
+                
+            model = genai.GenerativeModel(m_name, **kwargs)
+            response = model.generate_content(prompt)
+            
+            if response and response.text:
+                if is_json:
+                    return json.loads(response.text)
+                return response.text
+                
+        except Exception as exc:
+            if _is_rate_limit_or_quota_error(exc):
+                # Put model in cooldown for 15 minutes so subsequent calls bypass it directly
+                _EXHAUSTED_MODELS[m_name] = time.time() + 900.0
+                logger.warning(
+                    f"Quota or rate limit exceeded for model '{m_name}'. "
+                    f"Temporarily marking model as exhausted. Cascading to next available model... (Error: {exc})"
+                )
+                continue
+            else:
+                logger.warning(f"Model '{m_name}' encountered an error: {exc}. Trying next candidate in cascade...")
+                continue
+
+    logger.warning("All models in the Gemini cascade failed or exhausted their quotas.")
+    return None
 
 def build_algorithmic_single_report(company_data: Any, metrics_dict: Dict, evaluation_report: Dict) -> Dict:
     """Builds a deterministic institutional investment thesis directly from verified financial statements."""
@@ -194,31 +299,66 @@ def generate_research_report(company_data: Any, metrics_dict: Dict, evaluation_r
         }}
         """
         
-        model_names = ['gemini-2.5-flash', 'gemini-1.5-flash', 'gemini-2.0-flash']
-        for m_name in model_names:
-            try:
-                model = genai.GenerativeModel(m_name, generation_config={"response_mime_type": "application/json"})
-                response = model.generate_content(prompt)
-                if response and response.text:
-                    result = json.loads(response.text)
-                    result['disclaimer'] = DISCLAIMER
-                    return result
-            except Exception as model_err:
-                logger.warning(f"Model {m_name} failed in single report: {model_err}")
-                continue
+        result = execute_gemini_generation(prompt, is_json=True)
+        if result and isinstance(result, dict):
+            result['disclaimer'] = DISCLAIMER
+            return result
 
-        # If all models failed or rate-limited, return algorithmic report
+        # If all models failed or were rate-limited, return algorithmic report
         return build_algorithmic_single_report(company_data, metrics_dict, evaluation_report)
         
     except Exception as e:
         logger.error(f"AI Generation failed: {str(e)}", exc_info=True)
         return build_algorithmic_single_report(company_data, metrics_dict, evaluation_report)
 
+def build_algorithmic_qa_answer(context: dict, question: str, qualitative_evidence: list) -> str:
+    """Builds a deterministic analytical response from context when external AI models are rate-limited or unavailable."""
+    profile = context.get("profile", {}) or context.get("company_data", {}).get("profile", {})
+    ticker = profile.get("ticker", "The company")
+    name = profile.get("name") or ticker
+    metrics = context.get("metrics", {})
+    evaluations = context.get("evaluations", {}) or context.get("evaluation", {})
+    
+    q_lower = question.lower()
+    
+    # Check for specific metric questions
+    if "roe" in q_lower or "return on equity" in q_lower:
+        val = metrics.get("roe")
+        pct = f"{val * 100:.1f}%" if val is not None else "unavailable"
+        return f"{name} ({ticker}) has a Return on Equity (ROE) of {pct}. This metric reflects the efficiency with which shareholders' equity is utilized to generate net income."
+    if "pe" in q_lower or "price to earnings" in q_lower or "valuation" in q_lower:
+        val = metrics.get("pe_ratio")
+        pe_str = f"{val:.1f}x" if val is not None else "unavailable"
+        return f"{name} ({ticker}) is trading at a Price-to-Earnings (P/E) multiple of {pe_str} based on latest reported earnings."
+    if "debt" in q_lower or "leverage" in q_lower:
+        val = metrics.get("debt_to_equity")
+        val_str = f"{val:.2f}" if val is not None else "unavailable"
+        return f"{name} ({ticker}) reported a Debt-to-Equity ratio of {val_str}."
+    if "margin" in q_lower or "operating margin" in q_lower:
+        val = metrics.get("operating_margin")
+        pct = f"{val * 100:.1f}%" if val is not None else "unavailable"
+        return f"{name} ({ticker}) generated an operating margin of {pct}."
+    if "growth" in q_lower or "revenue" in q_lower:
+        val = metrics.get("revenue_growth")
+        pct = f"{val * 100:.1f}%" if val is not None else "unavailable"
+        return f"{name} ({ticker}) reported year-over-year revenue growth of {pct}."
+
+    # General overview response
+    passed = evaluations.get("passed_count", "N/A")
+    total = evaluations.get("total_count", "N/A")
+    summary = f"Based on verified financial statements, {name} ({ticker}) met {passed} of {total} institutional investment principles."
+    if qualitative_evidence:
+        first_ev = qualitative_evidence[0] if isinstance(qualitative_evidence[0], dict) else {}
+        text_snippet = first_ev.get("text", "") or first_ev.get("content", "")
+        if text_snippet:
+            summary += f" Key filing disclosures highlight: '{text_snippet[:200]}...'"
+    return summary
+
 def answer_financial_question(context: dict, question: str) -> str:
     """Answers a user question bounded by the provided quantitative context and available qualitative filings."""
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key or api_key == "your_gemini_api_key_here":
-        return "AI service is not configured. Please add GEMINI_API_KEY to your environment."
+        return build_algorithmic_qa_answer(context, question, [])
 
     # Extract ticker if available to query qualitative RAG index
     ticker = None
@@ -254,7 +394,6 @@ def answer_financial_question(context: dict, question: str) -> str:
             logger.debug(f"Qualitative evidence retrieval skipped for {ticker}: {e}")
 
     try:
-        genai.configure(api_key=api_key)
         prompt = f"""
         You are 'Finolitics', an AI financial research assistant.
         Answer the user's question accurately and objectively using the provided financial context and qualitative filing excerpts.
@@ -274,15 +413,14 @@ def answer_financial_question(context: dict, question: str) -> str:
 
         QUESTION: {question}
         """
-        try:
-            model = genai.GenerativeModel('gemini-2.5-flash')
-            return model.generate_content(prompt).text
-        except Exception:
-            model = genai.GenerativeModel('gemini-2.5-flash')
-            return model.generate_content(prompt).text
+        answer = execute_gemini_generation(prompt, is_json=False)
+        if answer and isinstance(answer, str) and answer.strip():
+            return answer.strip()
+
+        return build_algorithmic_qa_answer(context, question, qualitative_evidence)
     except Exception as e:
         logger.error(f"Failed to generate answer: {e}", exc_info=True)
-        return f"Failed to generate answer: {str(e)}"
+        return build_algorithmic_qa_answer(context, question, qualitative_evidence)
 
 def build_algorithmic_comparison(context1: dict, context2: dict) -> dict:
     """Builds a deterministic institutional quantitative comparison tear-sheet from verified statement data."""
@@ -483,22 +621,10 @@ def generate_comparison_report(context1: dict, context2: dict) -> Union[Dict[str
         }}
         """
 
-        model_names = ['gemini-2.5-flash', 'gemini-1.5-flash', 'gemini-2.0-flash']
-        response = None
-        for m_name in model_names:
-            try:
-                model = genai.GenerativeModel(
-                    m_name,
-                    generation_config={"response_mime_type": "application/json"}
-                )
-                response = model.generate_content(prompt)
-                if response and response.text:
-                    parsed = json.loads(response.text)
-                    parsed["disclaimer"] = DISCLAIMER
-                    return parsed
-            except Exception as model_err:
-                logger.warning(f"Model {m_name} failed: {model_err}")
-                continue
+        parsed = execute_gemini_generation(prompt, is_json=True)
+        if parsed and isinstance(parsed, dict):
+            parsed["disclaimer"] = DISCLAIMER
+            return parsed
 
         # If LLM failed or was rate limited, fall back to institutional algorithmic comparison
         return build_algorithmic_comparison(context1, context2)
