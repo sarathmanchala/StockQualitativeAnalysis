@@ -51,6 +51,7 @@ def custom_exception_handler(exc, context):
                 "message": message,
                 "details": details,
             },
+            "detail": message,
         }
         return response
 
@@ -68,6 +69,7 @@ def custom_exception_handler(exc, context):
                 "code": "internal_server_error",
                 "message": "An unexpected internal server error occurred.",
             },
+            "detail": "An unexpected internal server error occurred.",
         },
         status=status.HTTP_500_INTERNAL_SERVER_ERROR,
     )

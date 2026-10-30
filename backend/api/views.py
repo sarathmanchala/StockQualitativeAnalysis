@@ -92,6 +92,14 @@ class AnalyzeView(APIView):
         metrics_result = calculate_metrics(company_data)
         metrics_dict = metrics_result.metrics.model_dump()
         principles = list(InvestmentPrinciple.objects.all())
+        if not principles:
+            try:
+                from api.apps import DEFAULT_PRINCIPLES
+                for p in DEFAULT_PRINCIPLES:
+                    InvestmentPrinciple.objects.get_or_create(identifier=p["identifier"], defaults=p)
+                principles = list(InvestmentPrinciple.objects.all())
+            except Exception as seed_err:
+                logger.warning(f"Failed to auto-seed principles: {seed_err}")
         evaluation_report = evaluate_principles(metrics_dict, principles)
 
         ai_report_dict = generate_research_report(

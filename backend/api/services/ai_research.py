@@ -194,7 +194,7 @@ def generate_research_report(company_data: Any, metrics_dict: Dict, evaluation_r
         }}
         """
         
-        model_names = ['gemini-3.5-flash', 'gemini-flash-latest', 'gemini-1.5-flash']
+        model_names = ['gemini-2.5-flash', 'gemini-1.5-flash', 'gemini-2.0-flash']
         for m_name in model_names:
             try:
                 model = genai.GenerativeModel(m_name, generation_config={"response_mime_type": "application/json"})
@@ -483,7 +483,7 @@ def generate_comparison_report(context1: dict, context2: dict) -> Union[Dict[str
         }}
         """
 
-        model_names = ['gemini-3.5-flash', 'gemini-flash-latest', 'gemini-1.5-flash']
+        model_names = ['gemini-2.5-flash', 'gemini-1.5-flash', 'gemini-2.0-flash']
         response = None
         for m_name in model_names:
             try:
