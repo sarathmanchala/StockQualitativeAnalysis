@@ -12,3 +12,4 @@ pgvector>=0.3.6
 pytest>=8.0.0
 pytest-django>=4.9.0
 pandas>=2.0.0
+yfinance>=0.2.28
