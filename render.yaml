@@ -1,7 +1,7 @@
 databases:
   - name: financial-rag-db
     databaseName: financial_research_db
-    user: postgres
+    user: financial_user
     plan: free
 
 services:
