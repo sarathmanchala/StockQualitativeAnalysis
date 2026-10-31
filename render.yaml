@@ -11,7 +11,7 @@ services:
     runtime: python
     plan: free
     buildCommand: "./build.sh"
-    startCommand: "python manage.py migrate && gunicorn config.wsgi:application --bind 0.0.0.0:$PORT --timeout 120"
+    startCommand: "python manage.py migrate && python manage.py seed_principles && python manage.py init_admin && gunicorn config.wsgi:application --bind 0.0.0.0:$PORT --timeout 120"
     envVars:
       - key: DATABASE_URL
         fromDatabase:
