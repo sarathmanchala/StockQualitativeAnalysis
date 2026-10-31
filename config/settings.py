@@ -209,23 +209,56 @@ SPECTACULAR_SETTINGS = {
 }
 
 # CORS configuration
-CORS_ALLOW_ALL_ORIGINS = True
-CORS_ALLOW_CREDENTIALS = True
-CORS_ALLOWED_ORIGIN_REGEXES = [
-    r"^https://.*\.vercel\.app$",
-    r"^https://.*\.onrender\.com$",
-]
+from corsheaders.defaults import default_headers, default_methods
 
-# CSRF configuration for SPA dev and production
-CSRF_TRUSTED_ORIGINS = [
+CORS_ALLOW_CREDENTIALS = True
+
+CORS_ALLOWED_ORIGINS = [
+    "https://financial-rag-frontend.onrender.com",
     "http://localhost:5173",
     "http://127.0.0.1:5173",
     "http://localhost:3000",
     "http://127.0.0.1:3000",
     "http://localhost:8000",
     "http://127.0.0.1:8000",
+]
+
+CORS_ALLOWED_ORIGIN_REGEXES = [
+    r"^https://.*\.onrender\.com$",
+    r"^https://.*\.vercel\.app$",
+    r"^http://localhost:\d+$",
+    r"^http://127\.0\.0\.1:\d+$",
+]
+
+CORS_ALLOW_HEADERS = list(default_headers) + [
+    "authorization",
+    "content-type",
+    "x-csrftoken",
+    "accept",
+    "origin",
+    "user-agent",
+    "dnt",
+    "cache-control",
+    "x-requested-with",
+]
+
+CORS_ALLOW_METHODS = list(default_methods) + [
+    "OPTIONS",
+]
+
+CORS_PREFLIGHT_MAX_AGE = 86400
+
+# CSRF configuration for SPA dev and production
+CSRF_TRUSTED_ORIGINS = [
+    "https://financial-rag-frontend.onrender.com",
     "https://*.onrender.com",
     "https://*.vercel.app",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:8000",
+    "http://127.0.0.1:8000",
 ]
 
 # External Service Bindings
