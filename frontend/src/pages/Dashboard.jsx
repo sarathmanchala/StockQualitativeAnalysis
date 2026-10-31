@@ -22,7 +22,15 @@ import AccountSettingsView from '../components/AccountSettingsView';
 import QualitativeResearchView from '../components/QualitativeResearchView';
 import { resolveTicker, searchDirectory } from '../data/companyDirectory';
 
-export default function Dashboard({ externalMode, setExternalMode, resetKey }) {
+export default function Dashboard({ 
+    externalMode, 
+    setExternalMode, 
+    resetKey, 
+    currentUser, 
+    setCurrentUser, 
+    authPrompt, 
+    setAuthPrompt 
+}) {
     const [mode, setMode] = useState('single');
     const [ticker, setTicker] = useState('');
     const [data, setData] = useState(null);
@@ -208,6 +216,29 @@ export default function Dashboard({ externalMode, setExternalMode, resetKey }) {
     const hasResults = Boolean(data || compareData);
     const showHero = !hasResults && !loading;
 
+    // Default to login / account view if user is unauthenticated or explicitly visiting account
+    if (externalMode === 'account' || !currentUser) {
+        return (
+            <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 animate-in fade-in">
+                <AccountSettingsView 
+                    onNavigate={(tab) => setExternalMode && setExternalMode(tab)}
+                    onLogoutSuccess={() => {
+                        if (setCurrentUser) setCurrentUser(null);
+                        if (setAuthPrompt) setAuthPrompt('You have been signed out.');
+                        if (setExternalMode) setExternalMode('account');
+                    }}
+                    onLoginSuccess={(user) => {
+                        if (setCurrentUser) setCurrentUser(user);
+                        if (setAuthPrompt) setAuthPrompt(null);
+                        if (setExternalMode) setExternalMode('overview');
+                    }}
+                    authPrompt={authPrompt || (!currentUser && externalMode !== 'account' ? 'Please sign in or create an analyst account to access this feature.' : null)}
+                    onClearAuthPrompt={() => setAuthPrompt && setAuthPrompt(null)}
+                />
+            </div>
+        );
+    }
+
     if (externalMode === 'overview' || externalMode === 'dashboard') {
         return (
             <UserDashboard 
@@ -246,16 +277,6 @@ export default function Dashboard({ externalMode, setExternalMode, resetKey }) {
         );
     }
 
-    if (externalMode === 'account') {
-        return (
-            <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 animate-in fade-in">
-                <AccountSettingsView 
-                    onNavigate={(tab) => setExternalMode && setExternalMode(tab)}
-                    onLogoutSuccess={() => setExternalMode && setExternalMode('overview')}
-                />
-            </div>
-        );
-    }
 
     if (externalMode === 'directory') {
         return (

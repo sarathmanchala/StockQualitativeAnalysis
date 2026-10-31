@@ -5,7 +5,7 @@ import {
 } from 'lucide-react';
 import { fetchCurrentUser, logoutUser, loginUser, registerUser } from '../services/api';
 
-export default function AccountSettingsView({ onNavigate, onLogoutSuccess }) {
+export default function AccountSettingsView({ onNavigate, onLogoutSuccess, onLoginSuccess, authPrompt, onClearAuthPrompt }) {
     const [userData, setUserData] = useState(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState(null);
@@ -37,6 +37,9 @@ export default function AccountSettingsView({ onNavigate, onLogoutSuccess }) {
         try {
             const data = await fetchCurrentUser();
             setUserData(data);
+            if (data && data.is_authenticated && data.user && onLoginSuccess) {
+                onLoginSuccess(data.user);
+            }
         } catch (err) {
             console.error('Failed to load user info:', err);
             setError(err.message || 'Unable to load account information.');
@@ -66,11 +69,14 @@ export default function AccountSettingsView({ onNavigate, onLogoutSuccess }) {
         setLoginLoading(true);
         setLoginError(null);
         try {
-            await loginUser(loginUsername, loginPassword);
+            const res = await loginUser(loginUsername, loginPassword);
             setLoginSuccess(true);
             setTimeout(() => {
                 setLoginSuccess(false);
                 loadUser();
+                if (onLoginSuccess) {
+                    onLoginSuccess(res.user || { username: loginUsername });
+                }
             }, 400);
         } catch (err) {
             setLoginError(err.message || 'Login failed. Check credentials.');
@@ -280,6 +286,28 @@ export default function AccountSettingsView({ onNavigate, onLogoutSuccess }) {
             ) : (
                 /* GUEST SIGN IN / SIGN UP CARD */
                 <div className="bg-[#131B2F] border border-slate-800 rounded-2xl p-6 sm:p-8 max-w-md mx-auto shadow-xl">
+                    {/* AUTH REQUIRED PROMPT BANNER */}
+                    {authPrompt && (
+                        <div className="bg-amber-950/40 border border-amber-600/50 rounded-xl p-3.5 mb-6 flex items-start justify-between gap-2.5 animate-in fade-in">
+                            <div className="flex items-start gap-2.5">
+                                <Lock className="w-4 h-4 text-amber-400 flex-shrink-0 mt-0.5" />
+                                <div>
+                                    <h4 className="text-xs font-bold text-amber-200 uppercase tracking-wide">Authentication Required</h4>
+                                    <p className="text-xs text-amber-300/90 mt-0.5 leading-snug">{authPrompt}</p>
+                                </div>
+                            </div>
+                            {onClearAuthPrompt && (
+                                <button
+                                    onClick={onClearAuthPrompt}
+                                    className="text-amber-400 hover:text-amber-200 text-xs px-1 hover:bg-amber-900/30 rounded"
+                                    title="Dismiss notice"
+                                >
+                                    ✕
+                                </button>
+                            )}
+                        </div>
+                    )}
+
                     {/* SEGMENTED SWITCH: SIGN IN / SIGN UP */}
                     <div className="flex p-1 bg-[#0A0F1C] rounded-xl border border-slate-800 mb-6">
                         <button
